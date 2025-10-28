@@ -16,9 +16,7 @@ const MODEL_NAME = process.env.MODEL_NAME;
 // ✅ Setup Express + Socket.io
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = 5000;
 const PDF_DIR = path.join(process.cwd(), "test", "data");
@@ -28,7 +26,7 @@ console.log("📂 Watching PDF directory:", PDF_DIR);
 
 let pdfTexts = {};
 
-// ✅ Function to load all PDFs from folder
+// ✅ Load PDFs from folder
 async function loadPDFs() {
   const files = fs.readdirSync(PDF_DIR).filter(f => f.endsWith(".pdf"));
   console.log("📚 Found PDF(s):", files);
@@ -48,56 +46,55 @@ async function loadPDFs() {
 
 await loadPDFs();
 
-// ✅ Helper: Call Hugging Face Chat API
+// ✅ Hugging Face Query
 async function askHuggingFace(userMessage) {
   try {
     console.log(`🔹 Sending to Hugging Face: "${userMessage}"`);
-
-    // combine all PDF text
     const contextText = Object.values(pdfTexts).join("\n\n");
 
     const payload = {
       model: MODEL_NAME,
       messages: [
-        { role: "system", content: "You are a helpful AI assistant that answers based on the given context." },
-        { role: "user", content: `Context:\n${contextText}\n\nUser question: ${userMessage}` }
+        {
+          role: "system",
+          content:
+            "Answer the user's question briefly and directly using only relevant information. Do not include any symbols, formatting, markdown, or extra explanation. If the answer is unknown, say 'I don't have enough information.'",
+        },
+        { role: "user", content: `Context:\n${contextText}\n\nQuestion: ${userMessage}` },
       ],
-      stream: false
+      stream: false,
     };
 
     const response = await axios.post(HF_API_URL, payload, {
       headers: {
         Authorization: `Bearer ${HF_API_KEY}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
     });
 
-    const text = response.data?.choices?.[0]?.message?.content || "No response";
+    const text = response.data?.choices?.[0]?.message?.content?.trim() || "No response";
     console.log("🤖 Hugging Face Response:", text);
     return text;
   } catch (err) {
     console.error("❌ Hugging Face API error:", err.response?.data || err.message);
-    return `⚠️ Hugging Face API Error: ${err.response?.statusText || err.message}`;
+    return `Error: ${err.response?.statusText || err.message}`;
   }
 }
 
-// ✅ Socket.io Communication
+// ✅ Socket.io logic
 io.on("connection", (socket) => {
   console.log("⚡ Client connected:", socket.id);
 
-  socket.on("disconnect", () => {
-    console.log("❌ Client disconnected:", socket.id);
-  });
+  socket.on("disconnect", () => console.log("❌ Client disconnected:", socket.id));
 
   socket.on("sendMessage", async (msg) => {
     console.log("📩 Message from client:", msg);
     const answer = await askHuggingFace(msg);
-    console.log("💬 Sending back answer...");
-    socket.emit("receiveMessage", `Chatbot: ${answer}`);
+    socket.emit("receiveMessage", answer);
   });
 });
 
-// ✅ Start the server
+// ✅ Start server
 server.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
