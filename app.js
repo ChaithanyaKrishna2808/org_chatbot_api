@@ -6,95 +6,130 @@ import path from "path";
 import pdf from "pdf-parse";
 import axios from "axios";
 import dotenv from "dotenv";
+import cors from "cors";
+import { fileURLToPath } from "url";
+
 dotenv.config();
 
-// ✅ Hugging Face API details
+// Helpers for __dirname in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ===== Environment Variables =====
 const HF_API_URL = process.env.HF_API_URL;
 const HF_API_KEY = process.env.HF_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME;
 
-// ✅ Setup Express + Socket.io
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
-const PORT = 5000;
+// ===== Constants =====
+const PORT = process.env.PORT || 5000;
 const PDF_DIR = path.join(process.cwd(), "test", "data");
 
-console.log("🚀 Starting Chatbot Server...");
-console.log("📂 Watching PDF directory:", PDF_DIR);
+// ===== Express Setup =====
+const app = express();
+const allowedOrigins = [
+  "http://localhost:4200",
+  "https://chatbot-ui2808.web.app" // your live Firebase UI domain
+];
 
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error("Not allowed by CORS"));
+  }
+}));
+
+app.use(express.json({ limit: "5mb" }));
+
+app.get("/health", (_req, res) => res.send("ok"));
+app.get("/", (_req, res) => res.json({ status: "API up", time: new Date().toISOString() }));
+
+// ===== Create HTTP + Socket.IO Server =====
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
+  path: "/socket.io"
+});
+
+// ===== Load PDFs =====
 let pdfTexts = {};
 
-// ✅ Load PDFs from folder
 async function loadPDFs() {
-  const files = fs.readdirSync(PDF_DIR).filter(f => f.endsWith(".pdf"));
-  console.log("📚 Found PDF(s):", files);
-
-  for (const file of files) {
-    const filePath = path.join(PDF_DIR, file);
-    try {
-      const dataBuffer = fs.readFileSync(filePath);
-      const pdfData = await pdf(dataBuffer);
-      pdfTexts[file] = pdfData.text.substring(0, 8000); // limit to 8k chars
-      console.log(`✅ Loaded: ${file}`);
-    } catch (err) {
-      console.log(`⚠️ Error reading ${file}: ${err.message}`);
+  try {
+    if (!fs.existsSync(PDF_DIR)) {
+      console.warn(`⚠️ PDF directory not found: ${PDF_DIR}`);
+      return;
     }
+    const files = fs.readdirSync(PDF_DIR).filter(f => f.endsWith(".pdf"));
+    console.log("📚 Found PDFs:", files);
+
+    for (const file of files) {
+      const filePath = path.join(PDF_DIR, file);
+      try {
+        const dataBuffer = fs.readFileSync(filePath);
+        const pdfData = await pdf(dataBuffer);
+        pdfTexts[file] = pdfData.text.substring(0, 8000); // limit size
+        console.log(`✅ Loaded: ${file}`);
+      } catch (err) {
+        console.log(`⚠️ Error reading ${file}: ${err.message}`);
+      }
+    }
+  } catch (e) {
+    console.error("❌ Error loading PDFs:", e.message);
   }
 }
 
 await loadPDFs();
 
-// ✅ Hugging Face Query
+// ===== Hugging Face Request =====
 async function askHuggingFace(userMessage) {
   try {
-    console.log(`🔹 Sending to Hugging Face: "${userMessage}"`);
     const contextText = Object.values(pdfTexts).join("\n\n");
-
     const payload = {
       model: MODEL_NAME,
       messages: [
         {
           role: "system",
           content:
-            "Answer the user's question briefly and directly using only relevant information. Do not include any symbols, formatting, markdown, or extra explanation. If the answer is unknown, say 'I don't have enough information.'",
+            "Answer the user's question briefly and directly using only relevant information. If unknown, reply: 'I don't have enough information.'"
         },
-        { role: "user", content: `Context:\n${contextText}\n\nQuestion: ${userMessage}` },
+        { role: "user", content: `Context:\n${contextText}\n\nQuestion: ${userMessage}` }
       ],
-      stream: false,
+      stream: false
     };
 
     const response = await axios.post(HF_API_URL, payload, {
       headers: {
         Authorization: `Bearer ${HF_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+        "Content-Type": "application/json"
+      }
     });
 
-    const text = response.data?.choices?.[0]?.message?.content?.trim() || "No response";
-    console.log("🤖 Hugging Face Response:", text);
-    return text;
+    return response.data?.choices?.[0]?.message?.content?.trim() || "No response";
   } catch (err) {
     console.error("❌ Hugging Face API error:", err.response?.data || err.message);
-    return `Error: ${err.response?.statusText || err.message}`;
+    return "Error contacting Hugging Face API.";
   }
 }
 
-// ✅ Socket.io logic
+// ===== Socket.IO Events =====
 io.on("connection", (socket) => {
   console.log("⚡ Client connected:", socket.id);
 
-  socket.on("disconnect", () => console.log("❌ Client disconnected:", socket.id));
+  socket.on("disconnect", () => console.log("❌ Disconnected:", socket.id));
 
   socket.on("sendMessage", async (msg) => {
-    console.log("📩 Message from client:", msg);
+    console.log("📩 Received:", msg);
     const answer = await askHuggingFace(msg);
     socket.emit("receiveMessage", answer);
   });
+
+  socket.on("askQuestion", async ({ fileId, question }) => {
+    const answer = await askHuggingFace(`${fileId ? `File:${fileId}\n` : ""}${question}`);
+    socket.emit("answer", { answer, at: Date.now() });
+  });
 });
 
-// ✅ Start server
+// ===== Start Server =====
 server.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`🚀 API + Socket.IO running on port ${PORT}`);
 });
